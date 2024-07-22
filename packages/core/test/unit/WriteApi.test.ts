@@ -342,6 +342,52 @@ describe('WriteApi', () => {
         expect(logs.error[0][0]).contains('Write to InfluxDB failed')
       })
     })
+    it('manual flushing withRetryBuffer waits for retries to exhaust', async () => {
+      nock('http://fake:8086')
+        .post('/api/v2/write')
+        .query(true)
+        .times(3)
+        .reply(429, 'too many request!')
+
+      const attempts: number[] = []
+      const writeFailed = (
+        _error: Error,
+        _lines: string[],
+        attempt: number
+      ): void => {
+        attempts.push(attempt)
+      }
+
+      useSubject({
+        maxRetryTime: 1000,
+        retryJitter: 0,
+        minRetryDelay: 1,
+        maxRetryDelay: 1,
+        maxRetries: 3,
+        batchSize: 5, // Prevent flush from automatically being called
+        writeFailed,
+      })
+      subject.writeRecord('test value=1')
+
+      try {
+        await subject.flush(true)
+        expect(false, 'Should have thrown').to.be.true
+      } catch (error) {
+        expect((error as Error).message).to.match(/429.*too many request!/)
+      }
+
+      await subject.close().then(() => {
+        expect(attempts).deep.equals([1, 2, 3, 4])
+        expect(logs.warn).to.length(3)
+        for (let i = 0; i < 3; i++) {
+          expect(logs.warn[i][0]).contains(
+            `Write to InfluxDB failed (attempt: ${i + 1})`
+          )
+        }
+        expect(logs.error).to.length(1)
+        expect(logs.error[0][0]).contains('Write to InfluxDB failed')
+      })
+    })
   })
   describe('convert point time to line protocol', () => {
     const writeAPI = createApi(ORG, BUCKET, 'ms', {
